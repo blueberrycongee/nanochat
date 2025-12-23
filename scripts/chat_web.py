@@ -591,6 +591,363 @@ async def stats():
         ]
     }
 
+
+# -----------------------------------------------------------------------------
+# OpenAI-Compatible API Endpoints
+# -----------------------------------------------------------------------------
+
+def build_conversation_tokens(worker: Worker, messages: List[OpenAIMessage]) -> tuple:
+    """Build conversation tokens from OpenAI-style messages. Returns (tokens, prompt_token_count)."""
+    bos = worker.tokenizer.get_bos_token_id()
+    user_start = worker.tokenizer.encode_special("<|user_start|>")
+    user_end = worker.tokenizer.encode_special("<|user_end|>")
+    assistant_start = worker.tokenizer.encode_special("<|assistant_start|>")
+    assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
+    
+    conversation_tokens = [bos]
+    for message in messages:
+        if message.role == "system":
+            # Treat system messages as user messages (nanochat doesn't have system role)
+            conversation_tokens.append(user_start)
+            conversation_tokens.extend(worker.tokenizer.encode(f"[System]: {message.content}"))
+            conversation_tokens.append(user_end)
+        elif message.role == "user":
+            conversation_tokens.append(user_start)
+            conversation_tokens.extend(worker.tokenizer.encode(message.content))
+            conversation_tokens.append(user_end)
+        elif message.role == "assistant":
+            conversation_tokens.append(assistant_start)
+            conversation_tokens.extend(worker.tokenizer.encode(message.content))
+            conversation_tokens.append(assistant_end)
+    
+    conversation_tokens.append(assistant_start)
+    return conversation_tokens, len(conversation_tokens)
+
+
+async def generate_openai_stream(
+    worker: Worker,
+    tokens: List[int],
+    request_id: str,
+    model_name: str,
+    temperature: float,
+    max_new_tokens: int,
+    top_k: Optional[int],
+    stop_sequences: Optional[List[str]] = None
+) -> AsyncGenerator[str, None]:
+    """Generate OpenAI-compatible streaming response."""
+    created = int(time.time())
+    assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
+    bos = worker.tokenizer.get_bos_token_id()
+    
+    accumulated_tokens = []
+    last_clean_text = ""
+    full_response = ""
+    
+    # Send initial chunk with role
+    initial_chunk = OpenAIStreamChunk(
+        id=request_id,
+        created=created,
+        model=model_name,
+        choices=[OpenAIStreamChoice(
+            index=0,
+            delta=OpenAIStreamDelta(role="assistant"),
+            finish_reason=None
+        )]
+    )
+    yield f"data: {initial_chunk.model_dump_json()}\n\n"
+    
+    finish_reason = "stop"
+    with worker.autocast_ctx:
+        for token_column, token_masks in worker.engine.generate(
+            tokens,
+            num_samples=1,
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            seed=random.randint(0, 2**31 - 1)
+        ):
+            token = token_column[0]
+            
+            if token == assistant_end or token == bos:
+                break
+            
+            accumulated_tokens.append(token)
+            current_text = worker.tokenizer.decode(accumulated_tokens)
+            
+            if not current_text.endswith('�'):
+                new_text = current_text[len(last_clean_text):]
+                if new_text:
+                    full_response += new_text
+                    
+                    # Check for stop sequences
+                    if stop_sequences:
+                        for stop_seq in stop_sequences:
+                            if stop_seq in full_response:
+                                # Truncate at stop sequence
+                                idx = full_response.find(stop_seq)
+                                new_text = new_text[:max(0, len(new_text) - (len(full_response) - idx))]
+                                finish_reason = "stop"
+                                if new_text:
+                                    chunk = OpenAIStreamChunk(
+                                        id=request_id,
+                                        created=created,
+                                        model=model_name,
+                                        choices=[OpenAIStreamChoice(
+                                            index=0,
+                                            delta=OpenAIStreamDelta(content=new_text),
+                                            finish_reason=None
+                                        )]
+                                    )
+                                    yield f"data: {chunk.model_dump_json()}\n\n"
+                                break
+                        else:
+                            # No stop sequence found, continue normally
+                            chunk = OpenAIStreamChunk(
+                                id=request_id,
+                                created=created,
+                                model=model_name,
+                                choices=[OpenAIStreamChoice(
+                                    index=0,
+                                    delta=OpenAIStreamDelta(content=new_text),
+                                    finish_reason=None
+                                )]
+                            )
+                            yield f"data: {chunk.model_dump_json()}\n\n"
+                            last_clean_text = current_text
+                            continue
+                        break  # Stop sequence found
+                    else:
+                        chunk = OpenAIStreamChunk(
+                            id=request_id,
+                            created=created,
+                            model=model_name,
+                            choices=[OpenAIStreamChoice(
+                                index=0,
+                                delta=OpenAIStreamDelta(content=new_text),
+                                finish_reason=None
+                            )]
+                        )
+                        yield f"data: {chunk.model_dump_json()}\n\n"
+                    last_clean_text = current_text
+        else:
+            # Loop completed without break (max tokens reached)
+            finish_reason = "length"
+    
+    # Send final chunk with finish_reason
+    final_chunk = OpenAIStreamChunk(
+        id=request_id,
+        created=created,
+        model=model_name,
+        choices=[OpenAIStreamChoice(
+            index=0,
+            delta=OpenAIStreamDelta(),
+            finish_reason=finish_reason
+        )]
+    )
+    yield f"data: {final_chunk.model_dump_json()}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def generate_openai_complete(
+    worker: Worker,
+    tokens: List[int],
+    prompt_tokens: int,
+    request_id: str,
+    model_name: str,
+    temperature: float,
+    max_new_tokens: int,
+    top_k: Optional[int],
+    stop_sequences: Optional[List[str]] = None
+) -> OpenAIChatResponse:
+    """Generate complete (non-streaming) OpenAI-compatible response."""
+    created = int(time.time())
+    assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
+    bos = worker.tokenizer.get_bos_token_id()
+    
+    accumulated_tokens = []
+    full_response = ""
+    finish_reason = "stop"
+    
+    with worker.autocast_ctx:
+        for token_column, token_masks in worker.engine.generate(
+            tokens,
+            num_samples=1,
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            seed=random.randint(0, 2**31 - 1)
+        ):
+            token = token_column[0]
+            
+            if token == assistant_end or token == bos:
+                break
+            
+            accumulated_tokens.append(token)
+        else:
+            finish_reason = "length"
+    
+    full_response = worker.tokenizer.decode(accumulated_tokens)
+    
+    # Check for stop sequences and truncate
+    if stop_sequences:
+        for stop_seq in stop_sequences:
+            if stop_seq in full_response:
+                full_response = full_response[:full_response.find(stop_seq)]
+                finish_reason = "stop"
+                break
+    
+    completion_tokens = len(accumulated_tokens)
+    
+    return OpenAIChatResponse(
+        id=request_id,
+        created=created,
+        model=model_name,
+        choices=[OpenAIChoice(
+            index=0,
+            message=OpenAIChoiceMessage(content=full_response),
+            finish_reason=finish_reason
+        )],
+        usage=OpenAIUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens
+        )
+    )
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: OpenAIChatRequest, http_request: Request):
+    """
+    OpenAI-compatible chat completions endpoint.
+    
+    Supports both streaming (stream=true) and non-streaming responses.
+    Compatible with OpenAI Python client and other OpenAI-compatible tools.
+    """
+    # Rate limiting
+    client_ip = get_client_ip(http_request)
+    if not await rate_limiter.is_allowed(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please try again later.",
+            headers={"Retry-After": str(RATE_LIMIT_WINDOW)}
+        )
+    
+    # Validate request
+    validate_openai_request(request)
+    
+    # Log incoming request
+    logger.info("="*20 + " [OpenAI API] " + "="*20)
+    for message in request.messages:
+        logger.info(f"[{message.role.upper()}]: {message.content}")
+    logger.info("-"*20)
+    
+    # Acquire worker
+    worker_pool = app.state.worker_pool
+    worker = await worker_pool.acquire_worker()
+    
+    try:
+        # Build conversation tokens
+        conversation_tokens, prompt_tokens = build_conversation_tokens(worker, request.messages)
+        
+        # Prepare parameters
+        request_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        model_name = app.state.model_name
+        temperature = request.temperature if request.temperature is not None else args.temperature
+        max_tokens = request.max_tokens if request.max_tokens is not None else args.max_tokens
+        top_k = request.top_k if request.top_k is not None else args.top_k
+        
+        # Handle stop sequences
+        stop_sequences = None
+        if request.stop:
+            stop_sequences = [request.stop] if isinstance(request.stop, str) else request.stop
+        
+        if request.stream:
+            # Streaming response
+            async def stream_and_release():
+                try:
+                    full_response_parts = []
+                    async for chunk in generate_openai_stream(
+                        worker, conversation_tokens, request_id, model_name,
+                        temperature, max_tokens, top_k, stop_sequences
+                    ):
+                        # Try to extract content for logging
+                        if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
+                            try:
+                                data = json.loads(chunk[6:])
+                                if "choices" in data and data["choices"]:
+                                    delta = data["choices"][0].get("delta", {})
+                                    if "content" in delta and delta["content"]:
+                                        full_response_parts.append(delta["content"])
+                            except:
+                                pass
+                        yield chunk
+                finally:
+                    full_response = "".join(full_response_parts)
+                    logger.info(f"[ASSISTANT] (GPU {worker.gpu_id}): {full_response}")
+                    logger.info("="*50)
+                    await worker_pool.release_worker(worker)
+            
+            return StreamingResponse(
+                stream_and_release(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+        else:
+            # Non-streaming response
+            try:
+                response = await generate_openai_complete(
+                    worker, conversation_tokens, prompt_tokens, request_id, model_name,
+                    temperature, max_tokens, top_k, stop_sequences
+                )
+                logger.info(f"[ASSISTANT] (GPU {worker.gpu_id}): {response.choices[0].message.content}")
+                logger.info("="*50)
+                return response
+            finally:
+                await worker_pool.release_worker(worker)
+    
+    except Exception as e:
+        await worker_pool.release_worker(worker)
+        logger.error(f"Error in OpenAI chat completion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/models")
+async def list_models():
+    """List available models (OpenAI-compatible)."""
+    model_name = getattr(app.state, 'model_name', 'nanochat')
+    created_at = getattr(app.state, 'created_at', int(time.time()))
+    
+    return OpenAIModelList(
+        data=[
+            OpenAIModel(
+                id=model_name,
+                created=created_at,
+                owned_by="nanochat"
+            )
+        ]
+    )
+
+
+@app.get("/v1/models/{model_id}")
+async def get_model(model_id: str):
+    """Get details of a specific model."""
+    model_name = getattr(app.state, 'model_name', 'nanochat')
+    created_at = getattr(app.state, 'created_at', int(time.time()))
+    
+    if model_id != model_name and model_id != "nanochat":
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    
+    return OpenAIModel(
+        id=model_name,
+        created=created_at,
+        owned_by="nanochat"
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     print(f"Starting NanoChat Web Server")
