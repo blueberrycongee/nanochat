@@ -208,6 +208,82 @@ class ChatRequest(BaseModel):
     max_tokens: Optional[int] = None
     top_k: Optional[int] = None
 
+
+# -----------------------------------------------------------------------------
+# OpenAI-Compatible API Models
+# -----------------------------------------------------------------------------
+class OpenAIMessage(BaseModel):
+    role: str
+    content: str
+    name: Optional[str] = None
+
+class OpenAIChatRequest(BaseModel):
+    """OpenAI-compatible chat completion request."""
+    model: str = "nanochat"
+    messages: List[OpenAIMessage]
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    n: Optional[int] = Field(default=1, ge=1, le=8)
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    max_tokens: Optional[int] = Field(default=None, ge=1, le=4096)
+    presence_penalty: Optional[float] = Field(default=0.0, ge=-2.0, le=2.0)
+    frequency_penalty: Optional[float] = Field(default=0.0, ge=-2.0, le=2.0)
+    user: Optional[str] = None
+    # Extension: top_k support (not in OpenAI API but useful)
+    top_k: Optional[int] = Field(default=None, ge=1, le=200)
+
+class OpenAIUsage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+class OpenAIChoiceMessage(BaseModel):
+    role: str = "assistant"
+    content: str
+
+class OpenAIChoice(BaseModel):
+    index: int
+    message: OpenAIChoiceMessage
+    finish_reason: str
+
+class OpenAIChatResponse(BaseModel):
+    """OpenAI-compatible chat completion response."""
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[OpenAIChoice]
+    usage: OpenAIUsage
+
+class OpenAIStreamDelta(BaseModel):
+    role: Optional[str] = None
+    content: Optional[str] = None
+
+class OpenAIStreamChoice(BaseModel):
+    index: int
+    delta: OpenAIStreamDelta
+    finish_reason: Optional[str] = None
+
+class OpenAIStreamChunk(BaseModel):
+    """OpenAI-compatible streaming chunk."""
+    id: str
+    object: str = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: List[OpenAIStreamChoice]
+
+class OpenAIModel(BaseModel):
+    id: str
+    object: str = "model"
+    created: int
+    owned_by: str
+
+class OpenAIModelList(BaseModel):
+    object: str = "list"
+    data: List[OpenAIModel]
+
+
 def validate_chat_request(request: ChatRequest):
     """Validate chat request to prevent abuse."""
     # Check number of messages
