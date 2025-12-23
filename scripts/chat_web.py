@@ -16,10 +16,12 @@ python -m scripts.chat_web --num-gpus 4
 To chat, open the URL printed in the console. (If on cloud box, make sure to use public IP)
 
 Endpoints:
-  GET  /           - Chat UI
-  POST /chat/completions - Chat API (streaming only)
-  GET  /health     - Health check with worker pool status
-  GET  /stats      - Worker pool statistics and GPU utilization
+  GET  /                    - Chat UI
+  POST /chat/completions    - Chat API (legacy, streaming only)
+  POST /v1/chat/completions - OpenAI-compatible Chat API (streaming & non-streaming)
+  GET  /v1/models           - List available models (OpenAI-compatible)
+  GET  /health              - Health check with worker pool status
+  GET  /stats               - Worker pool statistics and GPU utilization
 
 Abuse Prevention:
   - Maximum 500 messages per request
@@ -27,7 +29,9 @@ Abuse Prevention:
   - Maximum 32000 characters total conversation length
   - Temperature clamped to 0.0-2.0
   - Top-k clamped to 1-200
+  - Top-p clamped to 0.0-1.0
   - Max tokens clamped to 1-4096
+  - Rate limiting: 60 requests per minute per client
 """
 
 import argparse
@@ -37,12 +41,15 @@ import torch
 import asyncio
 import logging
 import random
+import time
+import uuid
+from collections import defaultdict
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
-from pydantic import BaseModel
-from typing import List, Optional, AsyncGenerator
+from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse, JSONResponse
+from pydantic import BaseModel, Field
+from typing import List, Optional, AsyncGenerator, Union, Dict, Any
 from dataclasses import dataclass
 from contextlib import nullcontext
 from nanochat.common import compute_init, autodetect_device_type
@@ -57,8 +64,14 @@ MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0
 MIN_TOP_K = 1
 MAX_TOP_K = 200
+MIN_TOP_P = 0.0
+MAX_TOP_P = 1.0
 MIN_MAX_TOKENS = 1
 MAX_MAX_TOKENS = 4096
+
+# Rate limiting settings
+RATE_LIMIT_REQUESTS = 60  # requests per window
+RATE_LIMIT_WINDOW = 60    # window in seconds
 
 parser = argparse.ArgumentParser(description='NanoChat Web Server')
 parser.add_argument('-n', '--num-gpus', type=int, default=1, help='Number of GPUs to use (default: 1)')
