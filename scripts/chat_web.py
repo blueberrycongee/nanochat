@@ -347,13 +347,69 @@ def validate_chat_request(request: ChatRequest):
                 detail=f"max_tokens must be between {MIN_MAX_TOKENS} and {MAX_MAX_TOKENS}"
             )
 
+
+def validate_openai_request(request: OpenAIChatRequest):
+    """Validate OpenAI-compatible chat request."""
+    if len(request.messages) == 0:
+        raise HTTPException(status_code=400, detail="At least one message is required")
+    if len(request.messages) > MAX_MESSAGES_PER_REQUEST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many messages. Maximum {MAX_MESSAGES_PER_REQUEST} allowed"
+        )
+    
+    total_length = 0
+    for i, message in enumerate(request.messages):
+        if not message.content:
+            raise HTTPException(status_code=400, detail=f"Message {i} has empty content")
+        msg_length = len(message.content)
+        if msg_length > MAX_MESSAGE_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Message {i} exceeds {MAX_MESSAGE_LENGTH} character limit"
+            )
+        total_length += msg_length
+    
+    if total_length > MAX_TOTAL_CONVERSATION_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Total conversation exceeds {MAX_TOTAL_CONVERSATION_LENGTH} character limit"
+        )
+    
+    # Validate role values (system is allowed in OpenAI format)
+    valid_roles = {"user", "assistant", "system"}
+    for i, message in enumerate(request.messages):
+        if message.role not in valid_roles:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Message {i} has invalid role '{message.role}'. Must be one of: {valid_roles}"
+            )
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract client IP for rate limiting."""
+    # Check for forwarded headers (behind proxy)
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+# Global rate limiter instance
+rate_limiter = RateLimiter()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load models on all GPUs on startup."""
     print("Loading nanochat models across GPUs...")
     app.state.worker_pool = WorkerPool(num_gpus=args.num_gpus)
+    app.state.rate_limiter = rate_limiter
+    app.state.model_name = f"nanochat-{args.source}"
+    app.state.created_at = int(time.time())
     await app.state.worker_pool.initialize(args.source, model_tag=args.model_tag, step=args.step)
     print(f"Server ready at http://localhost:{args.port}")
+    print(f"OpenAI-compatible API available at http://localhost:{args.port}/v1/chat/completions")
     yield
 
 app = FastAPI(lifespan=lifespan)
