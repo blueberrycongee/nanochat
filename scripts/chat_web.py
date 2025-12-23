@@ -160,6 +160,44 @@ class WorkerPool:
         """Return a worker to the pool."""
         await self.available_workers.put(worker)
 
+
+# -----------------------------------------------------------------------------
+# Rate Limiter
+# -----------------------------------------------------------------------------
+class RateLimiter:
+    """Simple in-memory rate limiter using sliding window."""
+    
+    def __init__(self, max_requests: int = RATE_LIMIT_REQUESTS, window_seconds: int = RATE_LIMIT_WINDOW):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: Dict[str, List[float]] = defaultdict(list)
+        self._lock = asyncio.Lock()
+    
+    async def is_allowed(self, client_id: str) -> bool:
+        """Check if a request from client_id is allowed."""
+        async with self._lock:
+            now = time.time()
+            # Clean old requests outside the window
+            self.requests[client_id] = [
+                t for t in self.requests[client_id] 
+                if now - t < self.window_seconds
+            ]
+            # Check if under limit
+            if len(self.requests[client_id]) < self.max_requests:
+                self.requests[client_id].append(now)
+                return True
+            return False
+    
+    def get_remaining(self, client_id: str) -> int:
+        """Get remaining requests for client."""
+        now = time.time()
+        recent = [t for t in self.requests.get(client_id, []) if now - t < self.window_seconds]
+        return max(0, self.max_requests - len(recent))
+
+
+# -----------------------------------------------------------------------------
+# Legacy API Models (for backward compatibility)
+# -----------------------------------------------------------------------------
 class ChatMessage(BaseModel):
     role: str
     content: str
