@@ -315,12 +315,12 @@ def validate_chat_request(request: ChatRequest):
             detail=f"Total conversation is too long. Maximum {MAX_TOTAL_CONVERSATION_LENGTH} characters allowed"
         )
 
-    # Validate role values
+    # Validate role values (legacy API only supports user and assistant)
     for i, message in enumerate(request.messages):
         if message.role not in ["user", "assistant"]:
             raise HTTPException(
                 status_code=400,
-                detail=f"Message {i} has invalid role. Must be 'user', 'assistant', or 'system'"
+                detail=f"Message {i} has invalid role '{message.role}'. Must be 'user' or 'assistant'. Use /v1/chat/completions for system message support."
             )
 
     # Validate temperature
