@@ -5,3 +5,10 @@ rustbpe/target/
 dev-ignore/
 report.md
 eval_bundle/
+
+# Environment variables (API keys, secrets)
+.env
+
+# Generated data files
+safety_conversations.jsonl
+identity_conversations.jsonl
