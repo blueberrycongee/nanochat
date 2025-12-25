@@ -898,16 +898,14 @@ async def openai_chat_completions(request: OpenAIChatRequest, http_request: Requ
             )
         else:
             # Non-streaming response
-            try:
-                response = await generate_openai_complete(
-                    worker, conversation_tokens, prompt_tokens, request_id, model_name,
-                    temperature, max_tokens, top_k, stop_sequences
-                )
-                logger.info(f"[ASSISTANT] (GPU {worker.gpu_id}): {response.choices[0].message.content}")
-                logger.info("="*50)
-                return response
-            finally:
-                await worker_pool.release_worker(worker)
+            response = await generate_openai_complete(
+                worker, conversation_tokens, prompt_tokens, request_id, model_name,
+                temperature, max_tokens, top_k, stop_sequences
+            )
+            logger.info(f"[ASSISTANT] (GPU {worker.gpu_id}): {response.choices[0].message.content}")
+            logger.info("="*50)
+            await worker_pool.release_worker(worker)
+            return response
     
     except Exception as e:
         await worker_pool.release_worker(worker)
