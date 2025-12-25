@@ -309,7 +309,7 @@ python examples/openai_client_example.py
 ### Task 1.1 Files
 | File | Lines | Type | Purpose |
 |------|-------|------|----------|
-| `dev/gen_safety_data.py` | 459 | Script | Generate 500+ safety conversations |
+| `dev/gen_safety_data.py` | 459 | Script | Generate 400+ safety conversations |
 | `.env.example` | 12 | Config | API credentials template |
 | `dev/analyze_safety_data.py` | 168 | Script | Verify and analyze generated data |
 
