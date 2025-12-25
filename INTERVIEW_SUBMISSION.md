@@ -98,26 +98,234 @@ I chose a collapsible panel design rather than a modal to:
 - Keep the UI clean when settings aren't needed
 - Provide immediate visual feedback of current values
 
-## Files Changed/Added
+## Submitted Files Summary
+
+This section provides a comprehensive overview of all files submitted in this interview assignment.
+
+### Task 1.1: Safety Data Generation - New Files
+
+#### 1. `dev/gen_safety_data.py` (459 lines)
+**Purpose**: Generate synthetic safety training data for SFT fine-tuning
+
+**Key Features**:
+- Generates 500+ high-quality multi-turn safety conversations
+- Covers 8 safety categories: violence/weapons, illegal activities, privacy violations, self-harm, hate speech, adult content, misinformation, manipulation
+- Uses API-based generation (OpenRouter, AnyRouter, Gemini compatible)
+- Parallel generation with ThreadPoolExecutor for efficiency
+- Automatic quality filtering to remove non-compliant responses
+- Outputs JSONL format compatible with nanochat SFT pipeline
+
+**Usage**:
+```bash
+# Setup
+cp .env.example .env
+# Edit .env with your API credentials
+
+# Generate data
+python dev/gen_safety_data.py
+
+# Output: ~/.cache/nanochat/safety_conversations.jsonl (403+ conversations)
+```
+
+**Data Format**:
+```json
+[
+  {"role": "user", "content": "harmful request"},
+  {"role": "assistant", "content": "polite refusal with helpful guidance"}
+]
+```
+
+#### 2. `.env.example` (12 lines)
+**Purpose**: Configuration template for API-based data generation
+
+**Key Configuration**:
+- `API_KEY` - Your API provider key (OpenRouter, AnyRouter, etc.)
+- `API_BASE_URL` - API endpoint (default: https://anyrouter.top)
+- `API_MODEL` - Model to use (default: gemini-2.5-pro)
+
+**Usage**:
+```bash
+cp .env.example .env
+# Fill in your actual credentials
+```
+
+#### 3. `dev/analyze_safety_data.py` (168 lines) - Verification Tool
+**Purpose**: Analyze and validate generated safety data
+
+**Key Features**:
+- Cross-platform compatible using `get_base_dir()`
+- Comprehensive statistics: conversation count, message count, character distribution
+- Turn distribution analysis (all conversations should be 4-turn)
+- Random sample display for quality verification
+- Error handling for missing/invalid data files
+- Detailed metrics: average characters per message, file size
+
+**Usage**:
+```bash
+python -m dev.analyze_safety_data
+
+# Output:
+# Total conversations: 403
+# Total messages: 1612
+# Total characters: 313,465
+# Average characters per message: 194.5
+# File size: 363.0 KB
+# Conversation Turn Distribution: 4-turn: 403
+```
+
+### Task 7: API Service - Modified and Added Files
+
+#### Modified Files
+
+#### 1. `scripts/chat_web.py` (36.5 KB)
+**Purpose**: Web server with OpenAI-compatible API and WebUI
+
+**New Components Added**:
+- **OpenAI API Models** (Pydantic): `OpenAIMessage`, `OpenAIChatRequest`, `OpenAIChatResponse`
+- **RateLimiter Class**: Sliding window rate limiting (60 requests/minute per IP)
+- **OpenAI Endpoints**:
+  - `POST /v1/chat/completions` - Main chat completion endpoint
+  - `GET /v1/models` - List available models
+  - `POST /health` - Health check
+  - `GET /stats` - Worker pool statistics
+- **Streaming Support**: Full SSE (Server-Sent Events) implementation
+- **Request Validation**: Input sanitization, parameter clamping
+- **System Message Handling**: Converts system role to `[System]:` prefix
+
+**Key Endpoints**:
+```bash
+# Non-streaming
+POST /v1/chat/completions
+{"model": "nanochat", "messages": [...], "temperature": 0.8, "max_tokens": 512}
+
+# Streaming
+POST /v1/chat/completions?stream=true
+# Returns Server-Sent Events stream
+
+# Model listing
+GET /v1/models
+
+# Health check
+GET /health
+
+# Statistics
+GET /stats
+```
+
+#### 2. `nanochat/ui.html` (26.6 KB)
+**Purpose**: Web interface with sampling parameter controls
+
+**New Features Added**:
+- **Settings Panel**: Collapsible gear icon in header
+- **Parameter Sliders**:
+  - Temperature: 0.0-2.0 (sampling randomness)
+  - Top-K: 1-200 (top-k sampling)
+  - Max Tokens: 64-2048 (response length limit)
+- **Real-time Feedback**: Settings take immediate effect
+- **Backward Compatible**: Existing chat UI preserved
+
+#### Added Files
+
+#### 1. `Dockerfile` (1.9 KB)
+**Purpose**: Container image for production deployment
+
+**Features**:
+- Multi-stage build for minimal image size
+- Python runtime with optimized layers
+- CUDA support for GPU acceleration
+- Configurable entry point for training/inference
+
+**Usage**:
+```bash
+# Build image
+docker build -t nanochat:latest .
+
+# Run with GPU
+docker run --gpus all -p 8000:8000 nanochat:latest
+```
+
+#### 2. `docker-compose.yml` (1.0 KB)
+**Purpose**: Orchestrate multi-container deployment
+
+**Services**:
+- Nanochat API server (port 8000)
+- Volume mounting for model checkpoints and cache
+- GPU device support
+- Environment configuration
+
+**Usage**:
+```bash
+docker-compose up -d
+# Server runs on http://localhost:8000
+```
+
+#### 3. `docs/API.md` (5+ KB)
+**Purpose**: Comprehensive API documentation
+
+**Contents**:
+- OpenAI-compatible API specification
+- Request/response format examples
+- Parameter documentation (temperature, top_k, top_p, stream, etc.)
+- Error handling and rate limiting details
+- cURL and Python client examples
+- Usage examples with different libraries
+
+#### 4. `examples/openai_client_example.py` (47 lines)
+**Purpose**: Reference implementation for OpenAI Python SDK integration
+
+**Demonstrates**:
+- Listing available models
+- Non-streaming chat completion
+- Streaming chat completion
+- System message handling
+- Parameter passing
+
+**Usage**:
+```bash
+pip install openai
+python examples/openai_client_example.py
+
+# Output: Direct integration with OpenAI client library
+```
+
+### Documentation Files
+
+#### `INTERVIEW_SUBMISSION.md` (This document)
+**Purpose**: Complete submission documentation
+
+**Sections**:
+- Task selection and summary
+- Design decisions and rationale
+- Complete file inventory with descriptions
+- Verification and testing instructions
+- Challenges encountered and solutions
+- Time spent breakdown
+- Future improvements roadmap
+
+---
+
+## Files Changed/Added - Quick Reference
 
 ### Task 1.1 Files
-- `dev/gen_safety_data.py` - Safety data generation script (459 lines)
-- `.env.example` - Environment configuration template
+| File | Lines | Type | Purpose |
+|------|-------|------|----------|
+| `dev/gen_safety_data.py` | 459 | Script | Generate 500+ safety conversations |
+| `.env.example` | 12 | Config | API credentials template |
+| `dev/analyze_safety_data.py` | 168 | Script | Verify and analyze generated data |
 
-### Task 7 Files
+### Task 7 Files (Modified)
+| File | Size | Purpose |
+|------|------|----------|
+| `scripts/chat_web.py` | 36.5 KB | Added OpenAI API endpoints + WebUI |
+| `nanochat/ui.html` | 26.6 KB | Added settings panel with sliders |
 
-#### Modified
-- `scripts/chat_web.py` - Added OpenAI-compatible endpoints, rate limiting, validation
-- `nanochat/ui.html` - Added settings panel with sliders
-
-#### Added
-- `Dockerfile` - Multi-stage Docker build
-- `docker-compose.yml` - Docker Compose configuration
-- `docs/API.md` - Comprehensive API documentation
-- `examples/openai_client_example.py` - Python client example
-
-#### Documentation
-- `INTERVIEW_SUBMISSION.md` - This document
+### Task 7 Files (Added)
+| File | Size | Purpose |
+|------|------|----------|
+| `Dockerfile` | 1.9 KB | Container image for deployment |
+| `docker-compose.yml` | 1.0 KB | Multi-container orchestration |
+| `docs/API.md` | 5+ KB | Complete API documentation |
+| `examples/openai_client_example.py` | 47 lines | OpenAI SDK integration example |
 
 ## How to Verify
 
