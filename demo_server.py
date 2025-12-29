@@ -27,7 +27,9 @@ import logging
 import os
 import random
 import time
-from typing import List, Optional
+from collections import defaultdict
+from typing import List, Optional, Dict
+from threading import Lock
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -46,6 +48,63 @@ parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind th
 args = parser.parse_args()
 
 app = FastAPI(title="NanoChat Demo", version="1.0.0")
+
+# -----------------------------------------------------------------------------
+# Rate Limiter
+# -----------------------------------------------------------------------------
+
+RATE_LIMIT_REQUESTS = 10  # Lower limit for demo purposes (easier to trigger)
+RATE_LIMIT_WINDOW = 60    # 60 seconds window
+
+class RateLimiter:
+    """Simple in-memory rate limiter using sliding window with thread safety."""
+    
+    def __init__(self, max_requests: int = RATE_LIMIT_REQUESTS, window_seconds: int = RATE_LIMIT_WINDOW):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: Dict[str, List[float]] = defaultdict(list)
+        self.lock = Lock()  # Thread-safe lock for concurrent requests
+    
+    def is_allowed(self, client_id: str) -> bool:
+        """Check if a request from client_id is allowed (thread-safe)."""
+        with self.lock:  # Ensure atomic check-and-increment
+            now = time.time()
+            # Clean old requests outside the window
+            self.requests[client_id] = [
+                t for t in self.requests[client_id] 
+                if now - t < self.window_seconds
+            ]
+            # Check if under limit
+            if len(self.requests[client_id]) < self.max_requests:
+                self.requests[client_id].append(now)
+                return True
+            return False
+    
+    def get_remaining(self, client_id: str) -> int:
+        """Get remaining requests for client."""
+        with self.lock:
+            now = time.time()
+            recent = [t for t in self.requests.get(client_id, []) if now - t < self.window_seconds]
+            return max(0, self.max_requests - len(recent))
+    
+    def get_retry_after(self, client_id: str) -> int:
+        """Get seconds until oldest request expires."""
+        with self.lock:
+            now = time.time()
+            recent = [t for t in self.requests.get(client_id, []) if now - t < self.window_seconds]
+            if not recent:
+                return 0
+            oldest = min(recent)
+            return int(self.window_seconds - (now - oldest)) + 1
+
+rate_limiter = RateLimiter()
+
+def get_client_ip(request: Request) -> str:
+    """Extract client IP for rate limiting."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 # -----------------------------------------------------------------------------
 # Request/Response Models
@@ -121,8 +180,25 @@ async def generate_stream(response_text: str) -> str:
     yield f'data: {json.dumps({"done": True})}\n\n'
 
 @app.post("/chat/completions")
-async def chat_completions(request: ChatRequest):
+async def chat_completions(request: ChatRequest, req: Request):
     """Chat completion endpoint (streaming only) - mimics original nanochat format."""
+    # Rate limiting check
+    client_ip = get_client_ip(req)
+    remaining_before = rate_limiter.get_remaining(client_ip)
+    allowed = rate_limiter.is_allowed(client_ip)
+    remaining_after = rate_limiter.get_remaining(client_ip)
+    
+    logger.info(f"[RATE LIMIT] IP: {client_ip}, Before: {remaining_before}, Allowed: {allowed}, After: {remaining_after}")
+    
+    if not allowed:
+        retry_after = rate_limiter.get_retry_after(client_ip)
+        logger.warning(f"[RATE LIMIT] Request blocked! Retry after {retry_after}s")
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
+    
     # Log incoming conversation to console
     logger.info("="*20)
     for message in request.messages:
@@ -192,8 +268,18 @@ async def generate_openai_stream(response_text: str, request_id: str, created_at
     yield 'data: [DONE]\n\n'
 
 @app.post("/v1/chat/completions")
-async def openai_chat_completions(request: OpenAIChatRequest):
+async def openai_chat_completions(request: OpenAIChatRequest, req: Request):
     """OpenAI-compatible chat completion endpoint (streaming & non-streaming)."""
+    # Rate limiting check
+    client_ip = get_client_ip(req)
+    if not rate_limiter.is_allowed(client_ip):
+        retry_after = rate_limiter.get_retry_after(client_ip)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
+    
     # Log incoming conversation to console
     logger.info("="*20)
     for message in request.messages:
@@ -266,12 +352,19 @@ async def health():
     }
 
 @app.get("/stats")
-async def stats():
+async def stats(req: Request):
     """Server statistics endpoint."""
+    client_ip = get_client_ip(req)
+    remaining = rate_limiter.get_remaining(client_ip)
     return {
         "mode": "demo",
         "workers": 1,
-        "available_workers": 1
+        "available_workers": 1,
+        "rate_limit": {
+            "max_requests": RATE_LIMIT_REQUESTS,
+            "window_seconds": RATE_LIMIT_WINDOW,
+            "remaining": remaining
+        }
     }
 
 if __name__ == "__main__":

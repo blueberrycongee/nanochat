@@ -370,6 +370,16 @@
             <h1>nanochat</h1>
         </div>
         <div class="header-right">
+            <div id="rateLimitDisplay" style="margin-right: 12px; font-size: 13px; color: #6b7280; display: flex; align-items: center; gap: 6px;">
+                <span>Quota:</span>
+                <span id="rateLimitValue" style="font-weight: 600; color: #16a34a;">10/10</span>
+            </div>
+            <button class="settings-btn" id="testRateLimitBtn" onclick="testRateLimit()" title="Test Rate Limiting" style="margin-right: 8px;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <polyline points="12 6 12 12 16 14"></polyline>
+                </svg>
+            </button>
             <button class="settings-btn" id="settingsBtn" onclick="toggleSettings()" title="Sampling Settings">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <circle cx="12" cy="12" r="3"></circle>
@@ -448,12 +458,39 @@
         const sendButton = document.getElementById('sendButton');
         const settingsBtn = document.getElementById('settingsBtn');
         const settingsPanel = document.getElementById('settingsPanel');
+        const rateLimitValue = document.getElementById('rateLimitValue');
 
         let messages = [];
         let isGenerating = false;
         let currentTemperature = 0.8;
         let currentTopK = 50;
         let currentMaxTokens = 512;
+        
+        // Update rate limit display
+        async function updateRateLimitDisplay() {
+            try {
+                const response = await fetch(`${API_URL}/stats`);
+                const data = await response.json();
+                const remaining = data.rate_limit.remaining;
+                const max = data.rate_limit.max_requests;
+                rateLimitValue.textContent = `${remaining}/${max}`;
+                
+                // Color coding
+                if (remaining === 0) {
+                    rateLimitValue.style.color = '#dc2626'; // Red
+                } else if (remaining <= 3) {
+                    rateLimitValue.style.color = '#f59e0b'; // Orange
+                } else {
+                    rateLimitValue.style.color = '#16a34a'; // Green
+                }
+            } catch (error) {
+                console.error('Failed to update rate limit:', error);
+            }
+        }
+        
+        // Update rate limit every 2 seconds
+        setInterval(updateRateLimitDisplay, 2000);
+        updateRateLimitDisplay(); // Initial update
 
         // Settings Panel Functions
         function toggleSettings() {
@@ -474,6 +511,121 @@
         function updateMaxTokens(value) {
             currentMaxTokens = parseInt(value);
             document.getElementById('maxTokensValue').textContent = currentMaxTokens;
+        }
+
+        // Rate Limit Testing Function
+        async function testRateLimit() {
+            const testBtn = document.getElementById('testRateLimitBtn');
+            testBtn.disabled = true;
+            testBtn.style.opacity = '0.5';
+            
+            // Get initial quota
+            await updateRateLimitDisplay();
+            const initialQuota = rateLimitValue.textContent;
+            
+            // Add system message explaining the test
+            const systemMsg = document.createElement('div');
+            systemMsg.className = 'message assistant';
+            systemMsg.innerHTML = `
+                <div class="message-content">
+                    <strong>🧪 Rate Limit Test Started</strong><br>
+                    Initial Quota: ${initialQuota}<br>
+                    Sending 20 concurrent requests...<br>
+                    (Limit: 10 requests per 60 seconds)
+                </div>
+            `;
+            chatWrapper.appendChild(systemMsg);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            
+            // Send all 20 requests concurrently
+            const startTime = Date.now();
+            const requests = [];
+            
+            for (let i = 1; i <= 20; i++) {
+                const requestPromise = fetch(`${API_URL}/chat/completions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        messages: [{ role: 'user', content: `Test ${i}` }],
+                        temperature: 0.8,
+                        max_tokens: 5,
+                        top_k: 50
+                    })
+                }).then(async response => {
+                    const timestamp = Date.now() - startTime;
+                    return { index: i, response, timestamp };
+                }).catch(error => {
+                    console.error(`Request ${i} error:`, error);
+                    return { index: i, error, timestamp: Date.now() - startTime };
+                });
+                
+                requests.push(requestPromise);
+            }
+            
+            // Wait for all requests to complete
+            const results = await Promise.all(requests);
+            
+            // Display results in order
+            let successCount = 0;
+            let rateLimitedCount = 0;
+            
+            for (const result of results.sort((a, b) => a.index - b.index)) {
+                if (result.error) {
+                    continue;
+                }
+                
+                const { index, response, timestamp } = result;
+                
+                if (response.status === 429) {
+                    rateLimitedCount++;
+                    const retryAfter = response.headers.get('Retry-After');
+                    const resultMsg = document.createElement('div');
+                    resultMsg.className = 'message assistant';
+                    resultMsg.innerHTML = `
+                        <div class="message-content" style="color: #dc2626;">
+                            ❌ Request ${index} (${timestamp}ms): <strong>Rate Limited (429)</strong><br>
+                            Retry after: ${retryAfter} seconds
+                        </div>
+                    `;
+                    chatWrapper.appendChild(resultMsg);
+                } else if (response.ok) {
+                    successCount++;
+                    const resultMsg = document.createElement('div');
+                    resultMsg.className = 'message assistant';
+                    resultMsg.innerHTML = `
+                        <div class="message-content" style="color: #16a34a;">
+                            ✅ Request ${index} (${timestamp}ms): Success
+                        </div>
+                    `;
+                    chatWrapper.appendChild(resultMsg);
+                }
+                
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+            
+            // Update quota display
+            await updateRateLimitDisplay();
+            const finalQuota = rateLimitValue.textContent;
+            
+            // Show summary
+            const summaryMsg = document.createElement('div');
+            summaryMsg.className = 'message assistant';
+            summaryMsg.innerHTML = `
+                <div class="message-content">
+                    <strong>📊 Test Complete</strong><br>
+                    Initial Quota: ${initialQuota}<br>
+                    Final Quota: ${finalQuota}<br>
+                    ✅ Successful: ${successCount}/20<br>
+                    ❌ Rate Limited: ${rateLimitedCount}/20<br>
+                    <br>
+                    <em>${rateLimitedCount > 0 ? '✅ Rate limiting is working! The first 10 requests succeeded, and the rest were blocked.' : '⚠️ All requests succeeded. This might be due to browser connection limits causing sequential requests instead of concurrent ones.'}</em>
+                </div>
+            `;
+            chatWrapper.appendChild(summaryMsg);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            
+            testBtn.disabled = false;
+            testBtn.style.opacity = '1';
         }
 
         chatInput.addEventListener('input', function() {
@@ -646,6 +798,8 @@
             } finally {
                 isGenerating = false;
                 sendButton.disabled = !chatInput.value.trim();
+                // Update rate limit display after request
+                updateRateLimitDisplay();
             }
         }
 
